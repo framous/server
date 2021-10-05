@@ -131,6 +131,7 @@ class Client(db.Model):
 class RequestFrameNameMessage(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     frame_id = db.Column(db.Integer, db.ForeignKey("frame.id"), unique=True)
+    requested_from_client_sid = db.Column(db.String(20))
 
     frame = db.relationship("Frame")
 
@@ -405,7 +406,17 @@ def connect_frame(frame_id):
 
 @socketio.on("disconnect")
 def disconnect():
-    pass
+    # Unassign incomplete frame name requests.
+    RequestFrameNameMessage.query.filter_by(
+        requested_from_client_sid=request.sid
+    ).update({"requested_from_client_sid": None})
+    # Delete the client, if it exists (clients are transient).
+    Client.query.filter_by(sid=request.sid).delete()
+
+    # Remove the frame's SID, if the frame exists.
+    Frame.query.filter_by(sid=request.sid).update({Frame.sid: None})
+
+    db.session.commit()
 
 
 @socketio.event
