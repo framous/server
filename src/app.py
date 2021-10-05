@@ -4,7 +4,7 @@ from http import HTTPStatus as Status
 from flask import Flask, request, Response
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import IntegrityError
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, emit
 
 
 app = Flask(__name__)
@@ -108,7 +108,8 @@ class Slideshow(db.Model):
 
 class Frame(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(50), nullable=False, unique=True)
+    sid = db.Column(db.String(20), unique=True)
+    name = db.Column(db.String(50), unique=True)
     # The slideshow that the frame is currently playing.
     slideshow_id = db.Column(db.Integer, db.ForeignKey("slideshow.id"))
 
@@ -120,6 +121,18 @@ class Frame(db.Model):
             "name": self.name,
             "slideshow": self.slideshow.to_dict() if self.slideshow else None,
         }
+
+
+class Client(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sid = db.Column(db.String(20), unique=True)
+
+
+class RequestFrameNameMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    frame_id = db.Column(db.Integer, db.ForeignKey("frame.id"), unique=True)
+
+    frame = db.relationship("Frame")
 
 
 db.create_all()
@@ -347,8 +360,47 @@ def connect_client():
 
 
 @socketio.event
-def connect_frame():
-    pass
+def connect_frame(frame_id):
+    # New frame
+    if not frame_id:
+        # Create the frame.
+        frame = Frame(sid=request.sid)
+        db.session.add(frame)
+
+        # If there are no connected clients, then add a request to be sent when
+        # one connects.
+        connected_client = Client.query.filter(Client.sid.isnot(None)).first()
+        if not connected_client:
+            message = RequestFrameNameMessage(frame=frame)
+            db.session.add(message)
+
+        # Commit the frame (and maybe the message).
+        try:
+            db.session.commit()
+        except IntegrityError as e:
+            db.session.rollback()
+            # TODO: Check the error message for correctness.
+            emit("error", {"message": e.statement}, room=request.sid)
+            return
+
+        # Respond with the frame ID so that the device can set it in the
+        # browser.
+        emit("set_frame_id", {"frame_id": frame.id}, room=request.sid)
+
+        # If there is a connected client, then request it for a name for the
+        # new frame.
+        if connected_client:
+            emit(
+                "request_frame_name",
+                {"frame_id": frame.id},
+                room=connected_client.sid
+            )
+
+    # Existing frame
+    else:
+        frame = db.session.get(Frame, frame_id)
+        frame.sid = request.sid
+        db.session.commit()
 
 
 @socketio.on("disconnect")
