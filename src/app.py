@@ -4,16 +4,13 @@ from http import HTTPStatus as Status
 from flask import Flask, request, Response
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import IntegrityError
-from flask_sock import Sock
+from flask_socketio import SocketIO
 
 
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:////var/lib/framous/framous.db"
 db = SQLAlchemy(app)
-sock = Sock(app)
-
-
-frames = {}
+socketio = SocketIO(app)
 
 
 """ MODELS """
@@ -341,16 +338,33 @@ def frame(name):
         return frame.to_dict(), Status.CREATED
 
 
-""" WEBSOCKET ROUTES """
+""" SOCKETIO EVENTS """
 
 
-@sock.route("/view")
-def view(ws):
-    global frames
+@socketio.event
+def connect_client():
+    pass
 
-    frame = Frame(ws)
-    frames[frame.uuid] = frame
 
-    while True:
-        data = ws.receive()
-        ws.send(data)
+@socketio.event
+def connect_frame():
+    pass
+
+
+@socketio.on("disconnect")
+def disconnect():
+    pass
+
+
+@socketio.event
+def request_name():
+    pass
+
+
+@socketio.event
+def set_name():
+    pass
+
+
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0")
