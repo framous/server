@@ -356,8 +356,24 @@ def frame(name):
 
 
 @socketio.event
-def connect_client():
-    pass
+def connect_client(_):
+    # Create the client.
+    client = Client(sid=request.sid)
+    db.session.add(client)
+    db.session.commit()
+
+    # If there are frame name request messages, then begin sending them to the
+    # client one at a time.
+    message = RequestFrameNameMessage.query.first()
+    if message:
+        message.requested_from_client_sid = request.sid
+        db.session.commit()
+
+        emit(
+            "request_frame_name",
+            {"frame_id": message.frame_id},
+            room=request.sid
+        )
 
 
 @socketio.event
@@ -370,7 +386,7 @@ def connect_frame(frame_id):
 
         # If there are no connected clients, then add a request to be sent when
         # one connects.
-        connected_client = Client.query.filter(Client.sid.isnot(None)).first()
+        connected_client = Client.query.first()
         if not connected_client:
             message = RequestFrameNameMessage(frame=frame)
             db.session.add(message)
@@ -420,12 +436,7 @@ def disconnect():
 
 
 @socketio.event
-def request_name():
-    pass
-
-
-@socketio.event
-def set_name():
+def set_frame_name(_):
     pass
 
 
