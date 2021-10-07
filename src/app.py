@@ -4,7 +4,7 @@ from http import HTTPStatus as Status
 from flask import Flask, request, Response
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import IntegrityError
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, close_room
 
 
 app = Flask(__name__)
@@ -355,67 +355,87 @@ def frame(name):
 """ SOCKETIO EVENTS """
 
 
+# TODO: Add slideshow control flows.
+# TODO: If there are multiple frames to name, after completing the naming
+# process for one, start on the next one.
+# TODO: Add frame and client cleaning flows.
+
+
 @socketio.event
 def connect_client(_):
     # Create the client.
     client = Client(sid=request.sid)
     db.session.add(client)
-    db.session.commit()
 
     # If there are frame name request messages, then begin sending them to the
     # client one at a time.
-    message = RequestFrameNameMessage.query.first()
+    message = RequestFrameNameMessage.query.filter(
+        RequestFrameNameMessage.requested_from_client_sid == None
+    ).first()
     if message:
         message.requested_from_client_sid = request.sid
-        db.session.commit()
 
+    try:
+        db.session.commit()
+        if message:
+            emit(
+                "request_frame_name",
+                {"frame_id": message.frame_id},
+                room=request.sid
+            )
+    except IntegrityError:
+        db.session.rollback()
         emit(
-            "request_frame_name",
-            {"frame_id": message.frame_id},
+            "error",
+            {"message": "You are already connected!"},
             room=request.sid
         )
 
 
 @socketio.event
-def connect_frame(frame_id):
+def connect_frame(json):
+    frame_id = json["frame_id"] if "frame_id" in json else None
+
     # New frame
     if not frame_id:
         # Create the frame.
         frame = Frame(sid=request.sid)
         db.session.add(frame)
 
-        # If there are no connected clients, then add a request to be sent when
-        # one connects.
-        connected_client = Client.query.first()
-        if not connected_client:
-            message = RequestFrameNameMessage(frame=frame)
-            db.session.add(message)
-
-        # Commit the frame (and maybe the message).
-        try:
-            db.session.commit()
-        except IntegrityError as e:
-            db.session.rollback()
-            # TODO: Check the error message for correctness.
-            emit("error", {"message": e.statement}, room=request.sid)
-            return
-
-        # Respond with the frame ID so that the device can set it in the
-        # browser.
-        emit("set_frame_id", {"frame_id": frame.id}, room=request.sid)
+        # Add a job for naming the frame.
+        message = RequestFrameNameMessage(frame=frame)
+        db.session.add(message)
 
         # If there is a connected client, then request it for a name for the
         # new frame.
+        connected_client = Client.query.first()
         if connected_client:
+            message.requested_from_client_sid = connected_client.sid
             emit(
                 "request_frame_name",
                 {"frame_id": frame.id},
                 room=connected_client.sid
             )
 
+        # Commit the frame and the job.
+        db.session.commit()
+
+        # Respond with the frame ID so that the device can set it in the
+        # browser.
+        emit("set_frame_id", {"frame_id": frame.id}, room=request.sid)
+
     # Existing frame
     else:
         frame = db.session.get(Frame, frame_id)
+
+        if frame.sid == request.sid:
+            emit(
+                "error",
+                {"message": "You are already connected!"},
+                room=request.sid
+            )
+            return
+
         frame.sid = request.sid
         db.session.commit()
 
@@ -436,8 +456,60 @@ def disconnect():
 
 
 @socketio.event
-def set_frame_name(_):
-    pass
+def set_frame_name(json):
+    frame_id = json["frame_id"]
+    name = json["name"]
+
+    # TODO: Normalize and validate the name!
+
+    if Frame.query.filter_by(name=name).one_or_none():
+        emit(
+            "error",
+            {"message": f"The name {name} is already taken"},
+            room=request.sid
+        )
+    else:
+        room = "tmp"
+        join_room(room, request.sid)
+        join_room(room, db.session.get(Frame, frame_id).sid)
+
+        emit("confirm_frame_name", {
+            "frame_id": frame_id,
+            "name": name
+        }, room=room)
+
+        close_room(room)
+
+
+@socketio.event
+def confirm_frame_name(json):
+    frame_id = json["frame_id"]
+    name = json["name"]
+    is_confirmed = json["is_confirmed"]
+
+    frame = db.session.get(Frame, frame_id)
+
+    if not is_confirmed:
+        emit("clear_frame_name_confirmation", room=frame.sid)
+        return
+
+    frame.name = name
+    # The naming job is complete - delete it.
+    RequestFrameNameMessage.query.filter_by(frame_id=frame_id).delete()
+
+    # At this point, it would be almost deliberate if there was a naming
+    # conflict. Check for it anyway.
+    try:
+        db.session.commit()
+        emit("confirm_frame_name_confirmation", {}, room=frame.sid)
+    except IntegrityError:
+        db.session.rollback()
+        emit("clear_frame_name_confirmation", room=frame.sid)
+        emit(
+            "error",
+            {"message": f"The name {name} is already taken"},
+            room=request.sid
+        )
 
 
 if __name__ == "__main__":
