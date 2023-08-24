@@ -1,7 +1,9 @@
 import os
-from enum import Enum
+import boto3
+from enum import Enum, unique
 from http import HTTPStatus as Status
 from flask import Flask, request, Response
+from werkzeug.utils import secure_filename
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import IntegrityError
 from flask_socketio import SocketIO, emit, join_room, close_room
@@ -11,6 +13,18 @@ app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:////var/lib/framous/framous.db"
 db = SQLAlchemy(app)
 socketio = SocketIO(app)
+
+s3 = boto3.resource("s3")
+
+
+S3_BUCKET = "ders-images"
+
+# TODO: Add support for more of these types.
+# https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#fully-supported-formats
+ALLOWED_EXTENSIONS = ["bmp", "dib", "eps", "gif", "icns", "ico", "im", "jpeg",
+                      "jpg", "jpe", "jp2", "jpg2", "jpf", "jpx", "msp", "pcx",
+                      "png", "ppm", "sgi", "spider", "tga", "tiff", "webp",
+                      "xbm"]
 
 
 """ MODELS """
@@ -49,6 +63,14 @@ class Folder(db.Model):
         return data
 
 
+@unique
+class ImageType(Enum):
+    ORIGINAL = "original"
+    OPTIMIZED = "optimized"
+    THUMBNAIL = "thumbnail"
+
+
+@unique
 class StorageType(Enum):
     S3 = range(1)
 
@@ -145,6 +167,14 @@ if not Folder.query.filter_by(path="").one_or_none():
     db.session.commit()
 
 
+""" HELPERS """
+
+
+def allowed_file(filename):
+    return "." in filename and \
+        filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
 """ REST ROUTES """
 
 
@@ -237,10 +267,55 @@ def create_image(_):
 
 
 # Use POST to signify that this is not idempotent.
+# TODO: Limit the uploaded file size.
 @app.route("/images/<int:id>", methods=["POST"])
 def upload_image(id):
-    # TODO
-    pass
+    image = Image.query.get(id)
+    if not image:
+        return Response(
+            f"Image resource with ID {id} not found",
+            Status.NOT_FOUND,
+            mimetype="text/plain"
+        )
+
+    if "file" not in request.files:
+        return Response(
+            "No file parts",
+            Status.BAD_REQUEST,
+            mimetype="text/plain"
+        )
+    file = request.files["file"]
+    if not file.filename:
+        return Response(
+            "Select a file",
+            Status.BAD_REQUEST,
+            mimetype="text/plain"
+        )
+    if not allowed_file(file.filename):
+        return Response(
+            f"File type '{os.path.splitext(file.filename[1])}' not allowed",
+            Status.UNPROCESSABLE_ENTITY,
+            mimetype="text/plain"
+        )
+
+    # TODO: Add authentication to secure this.
+    bucket = s3.Bucket(S3_BUCKET)
+    bucket.put_object(
+        Key=os.path.join(ImageType.ORIGINAL, image.path),
+        Body=file
+    )
+
+    # TODO: Implement FS storage.
+    # _, fname = os.path.split(image.path)
+    # file.save(fname)  # TODO: Use the folder here.
+
+    # TODO: Save thumbnails and compressed versions.
+    # fname_no_ext, _ = os.path.splitext(fname)
+    # im = Image.open(file)
+    # im.thumbnail((99999, 480))
+    # im.save(os.path.join(thumbnail_dir, rel_path, f"{fname_no_ext}.webp"), method=6)
+
+    return Response(status=Status.NO_CONTENT)
 
 
 @app.route("/slideshows")
